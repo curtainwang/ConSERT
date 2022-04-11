@@ -412,11 +412,15 @@ class AdvCLSoftmaxLoss(nn.Module):
             masks = torch.nn.functional.one_hot(torch.arange(0, batch_size), num_classes=batch_size).to(device=hidden1.device, dtype=torch.float)
 
             logits_aa = torch.matmul(hidden1, hidden1_large.transpose(0, 1)) / temperature  # shape (bsz, bsz)
-            logits_aa = logits_aa - masks * LARGE_NUM
+            logits_aa = logits_aa - masks * LARGE_NUM # 去掉对角线的值，即自己跟自己的相似度
             logits_bb = torch.matmul(hidden2, hidden2_large.transpose(0, 1)) / temperature  # shape (bsz, bsz)
             logits_bb = logits_bb - masks * LARGE_NUM
             logits_ab = torch.matmul(hidden1, hidden2_large.transpose(0, 1)) / temperature  # shape (bsz, bsz)
             logits_ba = torch.matmul(hidden2, hidden1_large.transpose(0, 1)) / temperature  # shape (bsz, bsz)
+
+            # 按道理讲，正常情况下，hidden1和hidden2里的相同编号的sequence是同一个句子，只不过是通过不同增广手段得到的
+            # loss_a的意思：row是batch-size，里面的行向量都是一样的，都是hidden1，所以都用hidden1作为左矩阵进行乘积得到的logits，即logits_aa和logits_ab
+            # loss_b的意思：row是batch-size，里面的行向量都是一样的，都是hidden2，所以都用hidden2作为左矩阵进行乘积得到的logits，即logits_bb和logits_ba
 
             loss_a = torch.nn.functional.cross_entropy(torch.cat([logits_ab, logits_aa], dim=1), labels)
             loss_b = torch.nn.functional.cross_entropy(torch.cat([logits_ba, logits_bb], dim=1), labels)
