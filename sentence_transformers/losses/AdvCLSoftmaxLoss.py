@@ -401,16 +401,26 @@ class AdvCLSoftmaxLoss(nn.Module):
             neg_cosine_loss = -1.0 * scores.mean()
             return neg_cosine_loss
             
-        elif self.contrastive_loss_type == "nt_xent":
-            if hidden_norm:
+            # https://github.com/yym6472/ConSERT/issues/9
+            elif self.contrastive_loss_type == "nt_xent":
+            if hidden_norm: # 对句向量做L2归一化，归一化后向量点积的结果即为原向量的cosine相似度
                 hidden1 = torch.nn.functional.normalize(hidden1, p=2, dim=-1)
                 hidden2 = torch.nn.functional.normalize(hidden2, p=2, dim=-1)
 
             hidden1_large = hidden1
             hidden2_large = hidden2
+            
+            # 下面的batch_size用N来表示
+            # labels 为 [0, 1, ..., N - 1]
             labels = torch.arange(0, batch_size).to(device=hidden1.device)
+            
+            # masks 为 N * N 的一个单位矩阵，对角元素为1.0，其余元素为0.0
+            # 这个masks对应上面公式中的 [k != i]，用来将自身mask掉
             masks = torch.nn.functional.one_hot(torch.arange(0, batch_size), num_classes=batch_size).to(device=hidden1.device, dtype=torch.float)
 
+            # 下面的logits_aa, logits_ab, logits_bb, logits_ba用来生成一个2N * 2N相似度矩阵，只不过分成了四个N*N的子矩阵。
+            # 其中，logits_aa和logits_bb，因为其对角线包含自身和自身的乘积（对应上面公式中k==i的那一项，其结果将永远为1），所以
+            # 将这部分数值替换为负无穷，这样在计算exp之后，其结果近似为0，也就可以近似认为这一项不存在
             logits_aa = torch.matmul(hidden1, hidden1_large.transpose(0, 1)) / temperature  # shape (bsz, bsz)
             logits_aa = logits_aa - masks * LARGE_NUM # 去掉对角线的值，即自己跟自己的相似度
             logits_bb = torch.matmul(hidden2, hidden2_large.transpose(0, 1)) / temperature  # shape (bsz, bsz)
@@ -422,9 +432,13 @@ class AdvCLSoftmaxLoss(nn.Module):
             # loss_a的意思：row是batch-size，里面的行向量都是一样的，都是hidden1，所以都用hidden1作为左矩阵进行乘积得到的logits，即logits_aa和logits_ab
             # loss_b的意思：row是batch-size，里面的行向量都是一样的，都是hidden2，所以都用hidden2作为左矩阵进行乘积得到的logits，即logits_bb和logits_ba
 
-            loss_a = torch.nn.functional.cross_entropy(torch.cat([logits_ab, logits_aa], dim=1), labels)
-            loss_b = torch.nn.functional.cross_entropy(torch.cat([logits_ba, logits_bb], dim=1), labels)
-            loss = loss_a + loss_b
+            
+             # torch.cat([logits_ab, logits_aa]中，每一行包含了公式中分母的2N - 1项（因为mask掉了自身那一项），而分子那一项
+            # 则通过labels体现，这里可以通过控制logits子矩阵的拼接，使得相同样本、不同view生成的句向量的相似度计算放在前
+            # 面，这样其 labels 正好为 [0, 1, ..., N - 1]
+            loss_a = torch.nn.functional.cross_entropy(torch.cat([logits_ab, logits_aa], dim=1), labels)  # 对view1的N个句向量计算交叉熵损失
+            loss_b = torch.nn.functional.cross_entropy(torch.cat([logits_ba, logits_bb], dim=1), labels)  # 对view2的N个句向量计算交叉熵损失，原理与上面一致，只不过调换了子矩阵的顺序
+            loss = loss_a + loss_b  # 2N个样本的交叉熵损失之和
             return loss
 
     def _recover_to_origin_keys(self, sentence_feature: Dict[str, Tensor], ori_keys: Set[str]):
